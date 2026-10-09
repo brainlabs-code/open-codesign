@@ -28,6 +28,7 @@ export interface ProviderRow {
   wire: WireApi;
   defaultModel: string;
   hasKey: boolean;
+  requiresApiKey?: boolean;
   reasoningLevel?: ReasoningLevel;
   /** Per-provider TLS verification opt-out (#229). Only surfaced for
    *  custom / imported providers; the runtime force-ignores it on built-ins. */
@@ -113,6 +114,9 @@ export function toProviderRows(
   for (const provider of allIds) {
     const ref = cfg.secrets?.[provider];
     const entry = resolveEntryFor(cfg, provider);
+    // Secrets also contain non-model credentials such as Tavily. Only actual
+    // model entries (or recognized legacy builtins) belong in the model list.
+    if (entry === null) continue;
 
     let maskedKey = '';
     let rowError: ProviderRow['error'];
@@ -160,6 +164,7 @@ export function toProviderRows(
       // Missing secrets count as configured only for providers that explicitly
       // declare keyless mode in their ProviderEntry/capabilities.
       hasKey: ref !== undefined || isKeylessProviderAllowed(provider, entry),
+      requiresApiKey: !isKeylessProviderAllowed(provider, entry),
       ...(entry?.reasoningLevel !== undefined ? { reasoningLevel: entry.reasoningLevel } : {}),
       ...(entry?.tlsRejectUnauthorized === true ? { tlsRejectUnauthorized: true } : {}),
       ...(rowError !== undefined ? { error: rowError } : {}),

@@ -33,6 +33,7 @@ export interface AddCustomProviderInput {
   wire: WireApi;
   baseUrl: string;
   apiKey: string;
+  requiresApiKey?: boolean;
   defaultModel: string;
   httpHeaders?: Record<string, string>;
   queryParams?: Record<string, string>;
@@ -45,6 +46,7 @@ export interface AddCustomProviderInput {
 
 export interface UpdateProviderInput {
   id: string;
+  requiresApiKey?: boolean;
   name?: string;
   baseUrl?: string;
   defaultModel?: string;
@@ -69,6 +71,7 @@ const ADD_PROVIDER_FIELDS = [
   'wire',
   'baseUrl',
   'apiKey',
+  'requiresApiKey',
   'defaultModel',
   'httpHeaders',
   'queryParams',
@@ -86,6 +89,7 @@ const UPDATE_PROVIDER_FIELDS = [
   'wire',
   'reasoningLevel',
   'apiKey',
+  'requiresApiKey',
   'tlsRejectUnauthorized',
 ] as const;
 
@@ -218,7 +222,7 @@ export function parseValidateKey(raw: unknown): ValidateKeyInput {
   const providerId = provider.trim();
   if (!isSupportedOnboardingProvider(providerId)) {
     throw new CodesignError(
-      `Provider "${providerId}" is not supported. Only anthropic, openai, openrouter, ollama.`,
+      `Provider "${providerId}" is not supported. Only anthropic, openai, atlascloud, openrouter, ollama.`,
       ERROR_CODES.PROVIDER_NOT_SUPPORTED,
     );
   }
@@ -284,10 +288,14 @@ export function parseAddProviderPayload(raw: unknown): AddCustomProviderInput {
     throw new CodesignError(`Unsupported wire: ${String(wire)}`, ERROR_CODES.IPC_BAD_INPUT);
   }
   const parsedBaseUrl = validRequiredUrl(baseUrl, 'baseUrl');
+  const requiresApiKey = r['requiresApiKey'];
+  if (requiresApiKey !== undefined && typeof requiresApiKey !== 'boolean') {
+    throw new CodesignError('requiresApiKey must be a boolean', ERROR_CODES.IPC_BAD_INPUT);
+  }
   if (typeof apiKey !== 'string') {
     throw new CodesignError('apiKey must be a string', ERROR_CODES.IPC_BAD_INPUT);
   }
-  if (apiKey.trim().length === 0) {
+  if (apiKey.trim().length === 0 && requiresApiKey !== false) {
     throw new CodesignError('apiKey must be a non-empty string', ERROR_CODES.IPC_BAD_INPUT);
   }
   if (typeof defaultModel !== 'string' || defaultModel.trim().length === 0) {
@@ -305,6 +313,7 @@ export function parseAddProviderPayload(raw: unknown): AddCustomProviderInput {
     apiKey: apiKey.trim(),
     defaultModel: defaultModel.trim(),
     setAsActive,
+    ...(requiresApiKey !== undefined ? { requiresApiKey } : {}),
   };
   const headers = stringMapFromOptional(r['httpHeaders'], 'httpHeaders');
   if (headers !== undefined && Object.keys(headers).length > 0) out.httpHeaders = headers;
@@ -339,6 +348,12 @@ export function parseUpdateProviderPayload(raw: unknown): UpdateProviderInput {
     throw new CodesignError('id must be a non-empty string', ERROR_CODES.IPC_BAD_INPUT);
   }
   const out: UpdateProviderInput = { id: id.trim() };
+  if (r['requiresApiKey'] !== undefined) {
+    if (typeof r['requiresApiKey'] !== 'boolean') {
+      throw new CodesignError('requiresApiKey must be a boolean', ERROR_CODES.IPC_BAD_INPUT);
+    }
+    out.requiresApiKey = r['requiresApiKey'];
+  }
   if (r['name'] !== undefined) {
     if (typeof r['name'] !== 'string' || r['name'].trim().length === 0) {
       throw new CodesignError('name must be a non-empty string', ERROR_CODES.IPC_BAD_INPUT);

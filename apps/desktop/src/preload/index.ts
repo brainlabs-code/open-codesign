@@ -1,9 +1,14 @@
 import type {
+  ActiveRunMessageInputV1,
+  ActiveRunMessageV1,
+  AskCancelledV1,
   CancelGenerationPayloadV1,
   ChatAppendInput,
   ChatMessage,
   ChatMessageRow,
   ClaudeCodeUserType,
+  CommentApplyResultV1,
+  CommentContentExpectations,
   CommentCreateInput,
   CommentRow,
   CommentStatus,
@@ -21,9 +26,16 @@ import type {
   ReportEventInput,
   ReportEventResult,
   ResourceStateV1,
+  SaveWebSearchSettingsInput,
   SelectedElement,
   SnapshotCreateInput,
+  SourceEditApplyRequestV1,
+  SourceEditApplyResultV1,
+  SourceEditInspectRequestV1,
+  SourceEditInspectResultV1,
   SupportedOnboardingProvider,
+  WebSearchSettingsState,
+  WebSearchTestResult,
   WireApi,
 } from '@open-codesign/shared';
 import { contextBridge, ipcRenderer } from 'electron';
@@ -171,6 +183,8 @@ export interface RenameDesignOptions {
 }
 
 export interface ExportInvokeResponse {
+  sourcesPath?: string;
+  researchWarnings?: string[];
   status: 'saved' | 'cancelled';
   path?: string;
   bytes?: number;
@@ -198,6 +212,7 @@ export interface ProviderRow {
   wire: WireApi;
   defaultModel: string;
   hasKey: boolean;
+  requiresApiKey?: boolean;
   reasoningLevel?: ReasoningLevel;
   /** Per-provider opt-in to skip TLS verification on outbound HTTPS.
    *  Built-in providers force-ignore this flag at runtime; only surfaced
@@ -237,6 +252,8 @@ export interface GenerateArtifact {
 }
 
 export interface GenerateResponse {
+  snapshotId?: string;
+  chatPersisted?: boolean;
   message: string;
   artifacts: GenerateArtifact[];
   inputTokens: number;
@@ -286,18 +303,27 @@ export interface AgentStreamEvent {
     | 'tool_call_result'
     | 'fs_updated'
     | 'agent_end'
+    | 'active_message'
+    | 'run_settled'
     | 'error';
   designId: string;
   /** Trace ID linking this event to the main-process generation log entry.
    *  Matches the generationId from the codesign:v1:generate payload — always
    *  present because the main process supplies it from baseCtx. */
   generationId: string;
+  runId?: string;
+  seq?: number;
+  schemaVersion?: 1;
+  outcome?: 'completed' | 'failed' | 'cancelled' | 'interrupted';
+  response?: GenerateResponse;
+  activeMessage?: ActiveRunMessageV1;
   // turn_start
   turnId?: string;
   // text_delta
   delta?: string;
   // turn_end
   finalText?: string;
+  chatPersisted?: boolean;
   // tool_call_start
   toolName?: string;
   command?: string;
@@ -387,9 +413,43 @@ export interface AskResult {
   answers: AskAnswer[];
 }
 export interface AskRequest {
+  runId?: string;
+  designId?: string;
   requestId: string;
   sessionId: string;
   input: AskInput;
+}
+
+export interface AskHistoryEntry extends AskRequest {
+  schemaVersion: 1;
+  status: 'pending' | 'answered' | 'cancelled' | 'interrupted';
+  createdAt: number;
+  updatedAt: number;
+  result?: AskResult;
+}
+export interface AskResolved {
+  requestId: string;
+  sessionId: string;
+  runId?: string;
+  designId?: string;
+  status: 'answered' | 'cancelled' | 'interrupted';
+}
+export interface RunRecoveryResult {
+  schemaVersion: 1;
+  events: AgentStreamEvent[];
+}
+
+export interface UsageBudgetTotals {
+  inputTokens: number;
+  outputTokens: number;
+  costUsd: number;
+}
+
+export interface UsageBudgetResult {
+  schemaVersion: 1;
+  design: UsageBudgetTotals;
+  today: UsageBudgetTotals;
+  week: UsageBudgetTotals;
 }
 
 const api = {
@@ -419,8 +479,24 @@ const api = {
       schemaVersion: 1,
       generationId,
     } satisfies CancelGenerationPayloadV1),
+  recoverRuns: (cursors: Record<string, number> = {}) =>
+    ipcRenderer.invoke('codesign:v1:recover-runs', {
+      schemaVersion: 1,
+      cursors,
+    }) as Promise<RunRecoveryResult>,
+  usageBudget: (designId: string) =>
+    ipcRenderer.invoke('codesign:v1:usage-budget', {
+      schemaVersion: 1,
+      designId,
+    }) as Promise<UsageBudgetResult>,
   generationStatus: () =>
     ipcRenderer.invoke('codesign:v1:generation-status') as Promise<GenerationStatusResult>,
+  sendActiveMessage: (payload: ActiveRunMessageInputV1) =>
+    ipcRenderer.invoke('codesign:v1:active-message', payload) as Promise<ActiveRunMessageV1>,
+  listActiveMessages: (designId: string) =>
+    ipcRenderer.invoke('codesign:v1:active-messages', { schemaVersion: 1, designId }) as Promise<
+      ActiveRunMessageV1[]
+    >,
   generateTitle: (prompt: string) =>
     ipcRenderer.invoke('codesign:v1:generate-title', { prompt }) as Promise<string>,
   applyComment: (payload: {
@@ -520,6 +596,7 @@ const api = {
       wire: WireApi;
       baseUrl: string;
       apiKey: string;
+      requiresApiKey?: boolean;
       defaultModel: string;
       httpHeaders?: Record<string, string>;
       queryParams?: Record<string, string>;
@@ -529,6 +606,7 @@ const api = {
     }) => ipcRenderer.invoke('config:v1:add-provider', input) as Promise<OnboardingState>,
     updateProvider: (input: {
       id: string;
+      requiresApiKey?: boolean;
       name?: string;
       baseUrl?: string;
       defaultModel?: string;
@@ -556,6 +634,7 @@ const api = {
       wire: WireApi;
       baseUrl: string;
       apiKey: string;
+      requiresApiKey?: boolean;
       httpHeaders?: Record<string, string>;
       allowPrivateNetwork?: boolean;
       tlsRejectUnauthorized?: boolean;
@@ -579,6 +658,12 @@ const api = {
     get: () => ipcRenderer.invoke('preferences:v1:get') as Promise<Preferences>,
     update: (patch: Partial<Preferences>) =>
       ipcRenderer.invoke('preferences:v1:update', patch) as Promise<Preferences>,
+  },
+  webSearch: {
+    get: () => ipcRenderer.invoke('settings:v1:get-web-search') as Promise<WebSearchSettingsState>,
+    save: (input: SaveWebSearchSettingsInput) =>
+      ipcRenderer.invoke('settings:v1:save-web-search', input) as Promise<WebSearchSettingsState>,
+    test: () => ipcRenderer.invoke('settings:v1:test-web-search') as Promise<WebSearchTestResult>,
   },
   memory: {
     getUser: () => ipcRenderer.invoke('memory:v1:get-user') as Promise<MemoryFileRead | null>,
@@ -631,6 +716,18 @@ const api = {
         { ok: true; models: string[] } | { ok: false; code: string; message: string }
       >,
   },
+  sourceEdits: {
+    inspect: (input: SourceEditInspectRequestV1) =>
+      ipcRenderer.invoke(
+        'codesign:source-edits:v1:inspect',
+        input,
+      ) as Promise<SourceEditInspectResultV1>,
+    apply: (input: SourceEditApplyRequestV1) =>
+      ipcRenderer.invoke(
+        'codesign:source-edits:v1:apply',
+        input,
+      ) as Promise<SourceEditApplyResultV1>,
+  },
   files: {
     list: (designId: string) =>
       ipcRenderer.invoke('codesign:files:v1:list', {
@@ -661,12 +758,18 @@ const api = {
         designId,
         path,
       }) as Promise<WorkspaceDocumentThumbnailResult>,
-    write: (designId: string, path: string, content: string) =>
+    write: (
+      designId: string,
+      path: string,
+      content: string,
+      options?: { expectedContent: string },
+    ) =>
       ipcRenderer.invoke('codesign:files:v1:write', {
         schemaVersion: 1,
         designId,
         path,
         content,
+        ...(options ? { expectedContent: options.expectedContent } : {}),
       }) as Promise<WorkspaceFileReadResult>,
     importToWorkspace: (input: {
       designId: string;
@@ -698,11 +801,12 @@ const api = {
   snapshots: {
     listDesigns: () =>
       ipcRenderer.invoke('snapshots:v1:list-designs', { schemaVersion: 1 }) as Promise<Design[]>,
-    createDesign: (name: string, workspacePath?: string | null) =>
+    createDesign: (name: string, workspacePath?: string | null, demoInputId?: string) =>
       ipcRenderer.invoke('snapshots:v1:create-design', {
         schemaVersion: 1,
         name,
         ...(workspacePath !== undefined ? { workspacePath } : {}),
+        ...(demoInputId !== undefined ? { demoInputId } : {}),
       }) as Promise<Design>,
     getDesign: (id: string) =>
       ipcRenderer.invoke('snapshots:v1:get-design', {
@@ -856,6 +960,19 @@ const api = {
         ids,
         snapshotId,
       }) as Promise<CommentRow[]>,
+    markAppliedIfUnchanged: (
+      designId: string,
+      ids: string[],
+      snapshotId: string,
+      expectedContent: CommentContentExpectations,
+    ) =>
+      ipcRenderer.invoke('comments:v1:mark-applied', {
+        schemaVersion: 1,
+        designId,
+        ids,
+        snapshotId,
+        expectedContent,
+      }) as Promise<CommentApplyResultV1>,
   },
   diagnostics: {
     log: (entry: {
@@ -902,11 +1019,23 @@ const api = {
   openExternal: (url: string) =>
     ipcRenderer.invoke('codesign:v1:open-external', url) as Promise<void>,
   ask: {
+    history: (filter?: { runId?: string; designId?: string }) =>
+      ipcRenderer.invoke('ask:history', filter) as Promise<AskHistoryEntry[]>,
+    onResolved: (cb: (event: AskResolved) => void) => {
+      const listener = (_e: unknown, event: AskResolved) => cb(event);
+      ipcRenderer.on('ask:resolved', listener);
+      return () => ipcRenderer.removeListener('ask:resolved', listener);
+    },
     pending: () => ipcRenderer.invoke('ask:list-pending') as Promise<AskRequest[]>,
     onRequest: (cb: (req: AskRequest) => void) => {
       const listener = (_e: unknown, req: AskRequest) => cb(req);
       ipcRenderer.on('ask:request', listener);
       return () => ipcRenderer.removeListener('ask:request', listener);
+    },
+    onCancelled: (cb: (event: AskCancelledV1) => void) => {
+      const listener = (_e: unknown, event: AskCancelledV1) => cb(event);
+      ipcRenderer.on('ask:cancelled', listener);
+      return () => ipcRenderer.removeListener('ask:cancelled', listener);
     },
     resolve: (requestId: string, result: AskResult) =>
       ipcRenderer.invoke('ask:resolve', { requestId, ...result }) as Promise<void>,
